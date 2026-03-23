@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
@@ -12,17 +12,27 @@ import spacy
 import unicodedata
 import re
 import os
+import psycopg2
+from psycopg2 import pool as pg_pool
+from psycopg2.extras import RealDictCursor
 import uvicorn
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("classifier")
+
+DATABASE_URL   = os.getenv("DATABASE_URL")
 
 # ─── Carga modelo SpaCy ───────────────────────────────────────────────────────
 try:
     nlp = spacy.load("es_core_news_sm")
-    print("✅ SpaCy model cargado correctamente")
+    logger.info("✅ SpaCy model cargado correctamente")
 except OSError:
-    print("⚠️  SpaCy model no encontrado, usando keywords puro")
+    logger.warning("⚠️  SpaCy model no encontrado, usando keywords puro")
     nlp = None
 
 app = FastAPI(title="DocuCloud Classifier", version="2.0")
+
 
 
 # ─── DTOs ─────────────────────────────────────────────────────────────────────
@@ -66,19 +76,153 @@ CONFIDENCE_THRESHOLD = 0.15
 
 # ─── Sistema de aprendizaje ───────────────────────────────────────────────────
 
-FEEDBACK_FILE = Path("feedback.json")
-MODEL_FILE    = Path("nb_model.pkl")
+FEEDBACK_FILE  = Path("feedback.json")   # fallback local
+MODEL_FILE     = Path("nb_model.pkl")    # fallback local
+
+# ── Conexión y persistencia en Postgres ───────────────────────────────────────
+
+db_pool = None
+
+def init_pool():
+    global db_pool
+    if DATABASE_URL:
+        db_pool = pg_pool.SimpleConnectionPool(1, 10, DATABASE_URL, connect_timeout=5)
+        logger.info("✅ Pool de conexiones creado")
+
+def get_db_conn():
+    if db_pool:
+        return db_pool.getconn()
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)   # fallback local
+
+def release_db_conn(conn):
+    if db_pool:
+        db_pool.putconn(conn)
+    else:
+        conn.close()
+
+def init_db():
+    if not DATABASE_URL:
+        logger.warning("⚠️  Sin DATABASE_URL, usando archivos locales")
+        return
+    try:
+        conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+        try:
+            with conn.cursor() as cur:
+                cur.execute("""
+                    CREATE TABLE IF NOT EXISTS classifier_feedback (
+                        id SERIAL PRIMARY KEY,
+                        filename TEXT,
+                        predicted TEXT,
+                        correct TEXT,
+                        preview_text TEXT,
+                        confidence FLOAT,
+                        timestamp TIMESTAMPTZ DEFAULT NOW()
+                    );
+                    CREATE TABLE IF NOT EXISTS classifier_model (
+                        id INT PRIMARY KEY,
+                        data BYTEA,
+                        updated_at TIMESTAMPTZ DEFAULT NOW()
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_feedback_predicted ON classifier_feedback(predicted);
+                    CREATE INDEX IF NOT EXISTS idx_feedback_correct   ON classifier_feedback(correct);
+                    CREATE INDEX IF NOT EXISTS idx_feedback_time      ON classifier_feedback(timestamp);
+                """)
+            conn.commit()
+        finally:
+            conn.close()
+        logger.info("✅ DB inicializada correctamente")
+    except Exception as e:
+        logger.error(f"⚠️  DB init error: {e}")
+    init_pool()  # ← crea el pool DESPUÉS de que las tablas existen
+
+def save_feedback_entry(entry: dict):
+    if not DATABASE_URL:
+        data = load_feedback()
+        data.append(entry)
+        FEEDBACK_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        return
+    conn = get_db_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO classifier_feedback
+                    (filename, predicted, correct, preview_text, confidence)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (
+                entry["filename"],
+                entry["predicted"],
+                entry["correct"],
+                entry.get("preview_text", ""),
+                entry.get("confidence"),
+            ))
+        conn.commit()
+    except Exception as e:
+        logger.error(f"⚠️  Error guardando feedback: {e}")
+    finally:
+        release_db_conn(conn)
+
+
+def save_model_to_db(model_bytes: bytes):
+    if not DATABASE_URL:
+        MODEL_FILE.write_bytes(model_bytes)
+        return
+    conn = get_db_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                INSERT INTO classifier_model (id, data, updated_at)
+                VALUES (1, %s, NOW())
+                ON CONFLICT (id) DO UPDATE
+                    SET data = EXCLUDED.data, updated_at = NOW()
+            """, (psycopg2.Binary(model_bytes),))
+        conn.commit()
+        logger.info("✅ Modelo guardado en DB")
+    except Exception as e:
+        logger.error(f"⚠️  Error guardando modelo: {e}")
+    finally:
+        release_db_conn(conn)
+
+def load_model_from_db() -> bytes | None:
+    if not DATABASE_URL:
+        return MODEL_FILE.read_bytes() if MODEL_FILE.exists() else None
+    conn = get_db_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT data FROM classifier_model WHERE id = 1")
+            row = cur.fetchone()
+            return bytes(row[0]) if row else None
+    except Exception:
+        return None
+    finally:
+        release_db_conn(conn)
+
+
+init_db()
 
 def load_feedback() -> list:
-    if FEEDBACK_FILE.exists():
-        return json.loads(FEEDBACK_FILE.read_text(encoding="utf-8"))
-    return []
+    if not DATABASE_URL:
+        if FEEDBACK_FILE.exists():
+            return json.loads(FEEDBACK_FILE.read_text(encoding="utf-8"))
+        return []
+    conn = get_db_conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute("""
+                SELECT filename, predicted, correct, preview_text, confidence
+                FROM classifier_feedback
+                ORDER BY timestamp ASC
+            """)
+            return [dict(r) for r in cur.fetchall()]
+    except Exception as e:
+        logger.error(f"⚠️  Error leyendo feedback: {e}")
+        return []
+    finally:
+        release_db_conn(conn)
 
 def save_feedback(entries: list):
-    FEEDBACK_FILE.write_text(
-        json.dumps(entries, ensure_ascii=False, indent=2),
-        encoding="utf-8"
-    )
+    pass 
 
 # ── Capa 2: dynamic_boosts ────────────────────────────────────────────────────
 # Estructura: { "Facturas": 1.15, "Contratos": 0.90 }
@@ -123,9 +267,8 @@ dynamic_boosts: Dict[str, float] = compute_dynamic_boosts()
 # ── Capa 3: Naive Bayes ───────────────────────────────────────────────────────
 
 def train_naive_bayes() -> bool:
-    """Entrena NB con el historial. Retorna True si entrenó exitosamente."""
+    global NB_MODEL_CACHE  # ← AGREGAR
     entries = load_feedback()
-    # Mínimo 10 ejemplos y al menos 2 categorías distintas para entrenar
     if len(entries) < 10:
         return False
 
@@ -140,19 +283,29 @@ def train_naive_bayes() -> bool:
     clf = MultinomialNB(alpha=0.5)
     clf.fit(X, labels)
 
-    MODEL_FILE.write_bytes(
-        pickle.dumps({"vectorizer": vectorizer, "clf": clf})
-    )
-    print(f"✅ Naive Bayes entrenado con {len(entries)} ejemplos")
+    save_model_to_db(pickle.dumps({"vectorizer": vectorizer, "clf": clf}))
+    NB_MODEL_CACHE = None  # ← AGREGAR — fuerza recarga en próximo classify
+    logger.info(f"✅ Naive Bayes entrenado con {len(entries)} ejemplos")
     return True
 
 
+NB_MODEL_CACHE = None
+
+def load_nb_model():
+    global NB_MODEL_CACHE
+    if NB_MODEL_CACHE:
+        return NB_MODEL_CACHE
+    model_bytes = load_model_from_db()
+    if model_bytes:
+        NB_MODEL_CACHE = pickle.loads(model_bytes)
+    return NB_MODEL_CACHE
+
+
 def predict_naive_bayes(filename: str, preview: str) -> Dict[str, float]:
-    """Retorna probabilidades por categoría o {} si no hay modelo."""
-    if not MODEL_FILE.exists():
+    bundle = load_nb_model()
+    if not bundle:
         return {}
     try:
-        bundle     = pickle.loads(MODEL_FILE.read_bytes())
         vectorizer = bundle["vectorizer"]
         clf        = bundle["clf"]
         text       = normalize(f"{filename} {preview}")
@@ -161,6 +314,7 @@ def predict_naive_bayes(filename: str, preview: str) -> Dict[str, float]:
         return dict(zip(clf.classes_, probs))
     except Exception:
         return {}
+
 
 
 # ─── Reglas de clasificación ──────────────────────────────────────────────────
@@ -736,37 +890,32 @@ class FeedbackStats(BaseModel):
 
 
 @app.post("/feedback", status_code=201)
-async def submit_feedback(req: FeedbackRequest):
-    """
-    Recibe corrección del usuario.
-    El frontend llama esto cuando el usuario reclasifica manualmente un doc.
-    """
+async def submit_feedback(req: FeedbackRequest, bg: BackgroundTasks):
     global dynamic_boosts
 
-    entries = load_feedback()
-    entries.append({
+    req.filename     = (req.filename or "")[:255]       
+    req.preview_text = (req.preview_text or "")[:2000]  
+
+    save_feedback_entry({
         "filename":     req.filename,
         "predicted":    req.predicted,
         "correct":      req.correct,
         "preview_text": req.preview_text or "",
         "confidence":   req.confidence,
-        "timestamp":    datetime.utcnow().isoformat(),
     })
-    save_feedback(entries)
-
-    # Recalcular boosts en caliente (sin reiniciar servidor)
+    entries = load_feedback()
     dynamic_boosts = compute_dynamic_boosts()
 
-    # Auto-entrenar NB cada 10 correcciones nuevas
     corrections = [e for e in entries if e["predicted"] != e["correct"]]
     if len(corrections) % 10 == 0 and len(corrections) > 0:
-        train_naive_bayes()
+        bg.add_task(train_naive_bayes)  # ← no bloquea el request
 
     return {
         "saved": True,
         "total_feedback": len(entries),
         "boosts_updated": dynamic_boosts,
     }
+
 
 
 @app.get("/feedback/stats", response_model=FeedbackStats)
@@ -813,6 +962,9 @@ async def retrain():
 
 @app.post("/classify", response_model=ClassifyResponse)
 async def classify_document(request: ClassifyRequest) -> ClassifyResponse:
+    request.file_name    = (request.file_name or "")[:255]      
+    request.preview_text = (request.preview_text or "")[:2000] 
+
     category, confidence, rules_matched = calculate_confidence(
         request.file_name,
         request.mime_type or "",
@@ -851,6 +1003,8 @@ async def get_categories():
 @app.post("/debug")
 async def debug_classify(request: ClassifyRequest):
     """Devuelve scores de TODAS las categorías para diagnóstico."""
+    if os.getenv("ENV", "production") != "development":
+        raise HTTPException(status_code=403, detail="Solo disponible en desarrollo")
     from fastapi.responses import JSONResponse
 
     norm_filename = normalize(request.file_name)
