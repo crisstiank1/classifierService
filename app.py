@@ -17,6 +17,7 @@ from psycopg2 import pool as pg_pool
 from psycopg2.extras import RealDictCursor
 import uvicorn
 import logging
+from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("classifier")
@@ -33,6 +34,14 @@ except OSError:
 
 app = FastAPI(title="DocuCloud Classifier", version="2.0")
 
+app = FastAPI(title="DocuCloud Classifier", version="2.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],        
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ─── DTOs ─────────────────────────────────────────────────────────────────────
