@@ -66,19 +66,83 @@ class ClassifyResponse(BaseModel):
 # 0.20 = señal débil       (extensión compartida por muchas categorías)
 
 EXTENSION_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "Facturas": {".xml": 0.60, ".pdf": 0.25, ".xlsx": 0.20, ".docx": 0.20}, 
-    "Contratos":  {".docx": 0.30, ".pdf": 0.20},
-    "Informes":   {".pbix": 0.60, ".twbx": 0.60, ".csv": 0.35,
-                   ".xlsx": 0.25, ".pptx": 0.20, ".pdf": 0.15},
-    "Personal":   {".tiff": 0.50, ".tif": 0.50, ".heic": 0.35,
-                   ".jpg": 0.20, ".jpeg": 0.20, ".png": 0.15,
-                   ".docx": 0.20, ".pdf": 0.15},
-    "Legal":      {".tiff": 0.50, ".tif": 0.50,
-                   ".pdf": 0.15, ".docx": 0.15},  # ← bajar a 0.15
-    "Proyectos": {".mpp": 0.60, ".xlsx": 0.25, ".pptx": 0.20, ".docx": 0.15},
-    "Otros":      {".ai": 0.55, ".psd": 0.55, ".indd": 0.55,
-                   ".eps": 0.45, ".svg": 0.35,
-                   ".pptx": 0.20, ".pdf": 0.10},
+    "Facturas": {
+        ".xml": 0.60,
+        ".pdf": 0.25,
+        ".xlsx": 0.20,
+        ".xls": 0.20,
+        ".docx": 0.20,
+    },
+
+    "Contratos":  {
+        ".docx": 0.30,
+        ".pdf": 0.20,
+        ".odt": 0.20,
+        ".rtf": 0.15,
+    },
+
+    "Informes": {
+        ".pbix": 0.60,
+        ".twbx": 0.60,
+        ".csv": 0.35,
+        ".xlsx": 0.25,
+        ".xls": 0.25,
+        ".xlsm": 0.25,
+        ".pptx": 0.20,
+        ".ppt": 0.20,
+        ".odt": 0.20,
+        ".ods": 0.20,
+        ".odp": 0.20,
+        ".pdf": 0.15,
+        ".json": 0.15,
+    },
+
+    "Personal": {
+        ".tiff": 0.50,
+        ".tif": 0.50,
+        ".heic": 0.35,
+        ".jpg": 0.20,
+        ".jpeg": 0.20,
+        ".png": 0.15,
+        ".docx": 0.20,
+        ".pdf": 0.15,
+    },
+
+    "Legal": {
+        ".tiff": 0.50,
+        ".tif": 0.50,
+        ".pdf": 0.15,
+        ".docx": 0.15,
+        ".odt": 0.15,
+    },
+
+    "Proyectos": {
+        ".mpp": 0.60,
+        ".xlsx": 0.25,
+        ".xls": 0.25,
+        ".xlsm": 0.25,
+        ".pptx": 0.20,
+        ".ppt": 0.20,
+        ".docx": 0.15,
+        ".json": 0.15,
+    },
+
+    "Otros": {
+        ".ai": 0.55,
+        ".psd": 0.55,
+        ".indd": 0.55,
+        ".eps": 0.45,
+        ".svg": 0.35,
+        ".pptx": 0.20,
+        ".ppt": 0.20,
+        ".pdf": 0.10,
+        ".rtf": 0.20,
+        ".md": 0.20,
+        ".log": 0.20,
+        ".json": 0.20,
+        ".ods": 0.20,
+        ".odp": 0.20,
+    },
 }
 
 CONFIDENCE_THRESHOLD = 0.15
