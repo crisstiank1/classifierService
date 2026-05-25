@@ -1,9 +1,9 @@
 from fastapi import FastAPI, BackgroundTasks, HTTPException
-from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
 from collections import defaultdict
-from datetime import datetime
 from sklearn.naive_bayes import MultinomialNB
 from sklearn.feature_extraction.text import TfidfVectorizer
 import json
@@ -17,34 +17,27 @@ from psycopg2 import pool as pg_pool
 from psycopg2.extras import RealDictCursor
 import uvicorn
 import logging
-from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("classifier")
 
-DATABASE_URL   = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# ─── Carga modelo SpaCy ───────────────────────────────────────────────────────
 try:
     nlp = spacy.load("es_core_news_sm")
     logger.info("✅ SpaCy model cargado correctamente")
 except OSError:
-    logger.warning("⚠️  SpaCy model no encontrado, usando keywords puro")
+    logger.warning("⚠️ SpaCy model no encontrado, usando keywords puro")
     nlp = None
-
-app = FastAPI(title="DocuCloud Classifier", version="2.0")
 
 app = FastAPI(title="DocuCloud Classifier", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],        
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-
-# ─── DTOs ─────────────────────────────────────────────────────────────────────
 
 class ClassifyRequest(BaseModel):
     file_name: str
@@ -52,12 +45,23 @@ class ClassifyRequest(BaseModel):
     preview_text: Optional[str] = None
     size_bytes: Optional[int] = None
 
-
 class ClassifyResponse(BaseModel):
     category: str
     confidence: float
-    suggested_tags: List[str] = []
-    rules_matched: List[str] = []
+    suggested_tags: List[str] = Field(default_factory=list)
+    rules_matched: List[str] = Field(default_factory=list)
+
+@app.on_event("startup")
+async def startup_event():
+    try:
+        init_db()
+        logger.info("✅ Startup completado")
+    except Exception as e:
+        logger.error(f"❌ Error en startup: {e}")
+
+if __name__ == "__main__":
+    is_dev = os.getenv("ENV", "production").lower() == "development"
+    uvicorn.run("app:app", host="0.0.0.0", port=8001, reload=is_dev)
 
 
 # ─── MEJORA 5: Pesos dinámicos por extensión ──────────────────────────────────
@@ -1132,8 +1136,3 @@ async def debug_classify(request: ClassifyRequest):
     })
 
 
-# ─── Entry point ──────────────────────────────────────────────────────────────
-
-if __name__ == "__main__":
-    is_dev = os.getenv("ENV", "production").lower() == "development"
-    uvicorn.run("app:app", host="0.0.0.0", port=8001, reload=is_dev)
